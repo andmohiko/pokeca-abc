@@ -39,7 +39,11 @@ Perfect_Mixer = 1128
 Zeyu = 1192
 Lillie_Determination = 1227
 Boss_Orders = 1182
-Battle_Colosseum = 1264
+Ogerpon_Hearth = 358
+Ishizumai_A = 344
+Ishizumai_B = 532
+Iwaparesu = 345
+Basic_Grass_Energy = 1
 Basic_Fire_Energy = 2
 Basic_Fighting_Energy = 6
 
@@ -51,6 +55,8 @@ _current_turn_log = []
 _prize = []
 _card_counts = defaultdict(int)
 _serial_set = set()
+_iwaparesu_mode = False
+_op_confirmed_not_iwaparesu = False
 
 
 def agent(obs_dict):
@@ -197,6 +203,8 @@ def agent(obs_dict):
     bench_attacker = False
     has_fire_energy_on_field = False
     field_fire_energy_count = 0
+    ogerpon_fire_energy_count = 0
+    ogerpon_on_bench = False
 
     for card in my_state.active:
         if card is None:
@@ -205,6 +213,10 @@ def agent(obs_dict):
         field_counts[card.id] += 1
         if not card.appearThisTurn and card.id == Charcadet:
             can_evolve_charcadet = True
+        if card.id == Ogerpon_Hearth:
+            for ec in card.energyCards:
+                if ec.id == Basic_Fire_Energy:
+                    ogerpon_fire_energy_count += 1
         for ec in card.energyCards:
             if ec.id == Basic_Fire_Energy:
                 has_fire_energy_on_field = True
@@ -215,6 +227,11 @@ def agent(obs_dict):
             can_evolve_charcadet = True
         if card.id == Ceruledge_ex and len(card.energies) >= 1:
             bench_attacker = True
+        if card.id == Ogerpon_Hearth:
+            ogerpon_on_bench = True
+            for ec in card.energyCards:
+                if ec.id == Basic_Fire_Energy:
+                    ogerpon_fire_energy_count += 1
         for ec in card.energyCards:
             if ec.id == Basic_Fire_Energy:
                 has_fire_energy_on_field = True
@@ -273,9 +290,61 @@ def agent(obs_dict):
     needed_ceruledge = (op_remaining_prizes + 1) // 2  # ceil(prizes / 2)
     need_more_ceruledge = field_counts[Ceruledge_ex] < needed_ceruledge
 
-    stadium_id = 0
-    for card in state.stadium:
-        stadium_id = card.id
+    # --- LO対策: 理想盤面判定 ---
+    ceruledge_with_energy = 0
+    for card in my_state.active:
+        if card is not None and card.id == Ceruledge_ex and len(card.energies) >= 1:
+            ceruledge_with_energy += 1
+    for card in my_state.bench:
+        if card.id == Ceruledge_ex and len(card.energies) >= 1:
+            ceruledge_with_energy += 1
+    ideal_board = ceruledge_with_energy >= 2
+    lo_danger = my_state.deckCount <= 8
+
+    # キチキギスex用のベンチ枠予約
+    fezandipiti_on_field = field_counts[Fezandipiti_ex] > 0
+    bench_count = len(my_state.bench)
+    # キチキギスexが場にいなければベンチ1枠を空けておく
+    bench_max_for_others = 4 if not fezandipiti_on_field else 5
+
+    # --- 対イワパレスモード検知（一度検知したら試合中維持） ---
+    global _iwaparesu_mode
+    if state.turn == 0:
+        _iwaparesu_mode = False
+    if not _iwaparesu_mode:
+        for card in op_state.active:
+            if card is not None and card.id in (Ishizumai_A, Ishizumai_B, Iwaparesu):
+                _iwaparesu_mode = True
+        if not _iwaparesu_mode:
+            for card in op_state.bench:
+                if card.id in (Ishizumai_A, Ishizumai_B, Iwaparesu):
+                    _iwaparesu_mode = True
+    iwaparesu_mode = _iwaparesu_mode
+    op_active_is_iwaparesu = False
+    for card in op_state.active:
+        if card is not None and card.id == Iwaparesu:
+            op_active_is_iwaparesu = True
+
+    # --- オーガポン3状態判定 ---
+    # 相手が草以外のエネルギーを使っていたら「イワパレスではない」確定
+    global _op_confirmed_not_iwaparesu
+    if state.turn == 0:
+        _op_confirmed_not_iwaparesu = False
+    if not _op_confirmed_not_iwaparesu and not iwaparesu_mode:
+        for card in op_state.active:
+            if card is not None:
+                for ec in card.energyCards:
+                    if ec.id != Basic_Grass_Energy and card_table[ec.id].cardType in (CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
+                        _op_confirmed_not_iwaparesu = True
+        for card in op_state.bench:
+            for ec in card.energyCards:
+                if ec.id != Basic_Grass_Energy and card_table[ec.id].cardType in (CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
+                    _op_confirmed_not_iwaparesu = True
+        for card in op_state.discard:
+            if card.id != Basic_Grass_Energy and card_table[card.id].cardType in (CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
+                _op_confirmed_not_iwaparesu = True
+    # 3状態: iwaparesu_mode(確定), _op_confirmed_not_iwaparesu(否定確定), どちらもFalse(不明)
+    ogerpon_unnecessary = not iwaparesu_mode and _op_confirmed_not_iwaparesu
 
     # 後攻1ターン目かどうか
     is_going_second_turn1 = (state.turn <= 1 and my_index != state.firstPlayer)
@@ -287,17 +356,45 @@ def agent(obs_dict):
                            and budew_on_bench
                            and active_id != Budew)
 
+    # オーガポンをバトル場に出すためのにげる判定
+    do_retreat_for_ogerpon = (iwaparesu_mode
+                              and op_active_is_iwaparesu
+                              and ogerpon_on_bench
+                              and ogerpon_fire_energy_count >= 3
+                              and active_id != Ogerpon_Hearth)
+
     # アタッカー入れ替え: ベンチにエネ付きソウブレイズexがいて、バトル場が非アタッカー
     do_retreat_for_attacker = (not do_retreat_for_budew
+                               and not do_retreat_for_ogerpon
                                and active_id != Ceruledge_ex
                                and active_id != Budew
                                and bench_attacker)
+
+    # キチキギスexがバトル場に出た場合のにげる判定
+    do_retreat_for_fezandipiti = (active_id == Fezandipiti_ex
+                                  and not do_retreat_for_budew
+                                  and not do_retreat_for_ogerpon
+                                  and not do_retreat_for_attacker
+                                  and len(my_state.bench) > 0)
 
     # --- ボスの指令でワンパンできる相手exがいるか ---
     can_boss_ko_ex = False
     for card in op_state.bench:
         if card_table[card.id].ex and card.hp <= current_damage:
             can_boss_ko_ex = True
+
+    # --- 対イワパレス時のボスの指令ターゲット ---
+    boss_iwaparesu_target = False
+    if iwaparesu_mode:
+        for card in op_state.bench:
+            if card.id in (Ishizumai_A, Ishizumai_B):
+                boss_iwaparesu_target = True
+                break
+        if not boss_iwaparesu_target:
+            for card in op_state.bench:
+                if card.id != Iwaparesu:
+                    boss_iwaparesu_target = True
+                    break
 
     # --- サポート選択ロジック ---
     playable_supporters = set()
@@ -314,18 +411,32 @@ def agent(obs_dict):
         zeyu_discardable += hand_fire_energy_count
     if not is_going_second_turn1:
         zeyu_discardable += hand_budew_count
+    if ogerpon_unnecessary:
+        zeyu_discardable += hand_counts.get(Ogerpon_Hearth, 0)
     zeyu_undiscardable = 0
     for card in my_state.hand:
         if card.id in (Ceruledge_ex, Charcadet, Perfect_Mixer):
+            zeyu_undiscardable += 1
+        elif card.id == Ogerpon_Hearth and not ogerpon_unnecessary:
+            zeyu_undiscardable += 1
+        elif iwaparesu_mode and card.id == Night_Stretcher:
             zeyu_undiscardable += 1
         elif card_table[card.id].cardType == CardType.SUPPORTER and card.id != Zeyu:
             zeyu_undiscardable += 1
     zeyu_preferred = zeyu_discardable > zeyu_undiscardable
 
+    # LO対策: 理想盤面 or 山札8枚以下→ドローサポート禁止
+    skip_draw_supporters = ideal_board or lo_danger
+
     use_support = 0
     if not state.supporterPlayed:
-        if can_boss_ko_ex and Boss_Orders in playable_supporters:
+        if iwaparesu_mode and boss_iwaparesu_target and op_active_is_iwaparesu and Boss_Orders in playable_supporters:
             use_support = Boss_Orders
+        elif can_boss_ko_ex and Boss_Orders in playable_supporters:
+            use_support = Boss_Orders
+        elif skip_draw_supporters:
+            # ドローサポートを使わない（ボスの指令は上で処理済み）
+            use_support = 0
         elif zeyu_preferred and Zeyu in playable_supporters:
             use_support = Zeyu
         elif Lillie_Determination in playable_supporters:
@@ -338,7 +449,11 @@ def agent(obs_dict):
         do_switch = False
     elif do_retreat_for_budew:
         do_switch = True
+    elif do_retreat_for_ogerpon:
+        do_switch = True
     elif do_retreat_for_attacker:
+        do_switch = True
+    elif do_retreat_for_fezandipiti:
         do_switch = True
     else:
         do_switch = False
@@ -357,7 +472,12 @@ def agent(obs_dict):
                 has_playable_cards = True
                 break
 
-    draw_support_score = 14000 if has_playable_cards else 90000
+    if skip_draw_supporters:
+        draw_support_score = -1  # LO対策: ドローサポート抑制
+    elif has_playable_cards:
+        draw_support_score = 14000
+    else:
+        draw_support_score = 90000
 
     # --- Score each option ---
     scores = []
@@ -383,7 +503,9 @@ def agent(obs_dict):
                     or context == SelectContext.TO_ACTIVE
                     or context == SelectContext.SETUP_ACTIVE_POKEMON):
                     if o.playerIndex == my_index:
-                        if card.id == Ceruledge_ex:
+                        if card.id == Ogerpon_Hearth and do_retreat_for_ogerpon:
+                            score += 200000
+                        elif card.id == Ceruledge_ex:
                             score += 50000 + energy_count * 5000
                         elif card.id == Charcadet:
                             score += 10000
@@ -394,32 +516,59 @@ def agent(obs_dict):
                                 score += 100000
                             else:
                                 score += 3000
+                        elif card.id == Ogerpon_Hearth:
+                            score += 4000
                         elif card.id == Mogurew:
-                            score += 2000
+                            score += 12000 if do_retreat_for_fezandipiti else 2000
                         elif card.id == Fezandipiti_ex:
                             score += 1000
                         score += energy_count * 1000 + hp
                     else:
-                        score += pokemon_score(card, True)
-                        if hp <= current_damage:
-                            score += 50000
+                        if iwaparesu_mode:
+                            if card.id in (Ishizumai_A, Ishizumai_B):
+                                score += 150000
+                            elif card.id == Iwaparesu:
+                                score += 1000
+                            else:
+                                score += 100000
+                        else:
+                            score += pokemon_score(card, True)
+                            if hp <= current_damage:
+                                score += 50000
 
                 elif context == SelectContext.SETUP_BENCH_POKEMON:
-                    # バトル開始前はモグリューを出さない
+                    # バトル開始前はモグリュー・オーガポンを出さない
                     if card.id == Charcadet:
                         score = 10000
                     else:
                         score = -1
 
                 elif context == SelectContext.TO_BENCH:
-                    if card.id == Budew:
+                    # ポフィンの対象制限: カルボウ常時、スボミー後1のみ、オーガポン対イワパレス時のみ
+                    is_from_poffin = select.effect is not None and select.effect.id == Buddy_Buddy_Poffin
+                    if is_from_poffin:
+                        if card.id == Ogerpon_Hearth and iwaparesu_mode:
+                            score = 100000  # イワパレスモード: オーガポン最優先
+                        elif card.id == Charcadet:
+                            score = 50000  # カルボウ
+                        elif card.id == Budew and is_going_second_turn1:
+                            score = 40000  # 後1スボミー
+                        else:
+                            score = -1
+                    elif card.id == Budew:
                         if is_going_second_turn1 and field_counts[Budew] == 0:
                             score = 100000
                         else:
                             score = -1
+                    elif card.id == Ogerpon_Hearth:
+                        if iwaparesu_mode:
+                            score = 45000
+                        else:
+                            score = -1  # イワパレス確定以外はベンチに出さない
                     elif card.id == Charcadet:
-                        if main_pokemon_count >= 3:
-                            # アタッカー3体以上→出さない。キチキギスex用にベンチ枠を空ける
+                        if bench_count >= bench_max_for_others:
+                            score = -1
+                        elif main_pokemon_count >= 3:
                             score = -1
                         elif main_pokemon_count <= 1:
                             score = 50000
@@ -428,14 +577,16 @@ def agent(obs_dict):
                         else:
                             score = 5000
                     elif card.id == Mogurew:
-                        if main_pokemon_count >= 2 and field_counts[Charcadet] >= 2:
+                        if bench_count >= bench_max_for_others:
+                            score = -1
+                        elif main_pokemon_count >= 2 and field_counts[Charcadet] >= 2:
                             score = 40000
                         elif main_pokemon_count >= 2:
                             score = 30000
                         else:
                             score = 8000
                     elif card.id == Fezandipiti_ex:
-                        score = 1000 if pre_ko else -1
+                        score = 10000
                     else:
                         score = 1000
 
@@ -445,7 +596,11 @@ def agent(obs_dict):
                         # パーフェクトミキサーでのトラッシュ選択
                         if card.id == Basic_Fighting_Energy:
                             score = 100000
+                        elif lo_danger or ideal_board:
+                            score = -1  # LO対策: 闘エネ以外捨てない
                         elif card.id == Budew and not is_going_second_turn1:
+                            score = 80000
+                        elif card.id == Ogerpon_Hearth and ogerpon_unnecessary:
                             score = 80000
                         elif card.id == Basic_Fire_Energy:
                             score = 70000 if field_fire_energy_count >= 3 else -1
@@ -453,28 +608,25 @@ def agent(obs_dict):
                             score = -1
                     else:
                         # 通常のサーチ先選択
+                        # 対イワパレス時: オーガポンが場にいなければ最優先サーチ
+                        if card.id == Ogerpon_Hearth and iwaparesu_mode and field_counts[Ogerpon_Hearth] == 0:
+                            score = 55000
                         # リソース枯渇チェック（夜のタンカ用）
-                        if card.id == Basic_Fire_Energy and fire_energy_scarce:
+                        elif card.id == Basic_Fire_Energy and fire_energy_scarce:
                             score = 70000
                         elif card.id == Ceruledge_ex and ceruledge_scarce and need_more_ceruledge:
                             score = 65000
                         # アタッカー準備のボトルネック
                         elif card.id == Charcadet:
                             if field_counts[Charcadet] == 0 and field_counts[Ceruledge_ex] == 0:
-                                score = 50000  # パターンA
-                            elif main_pokemon_count <= 1:
-                                score = 50000
-                            elif main_pokemon_count >= 3:
-                                score = 1000
+                                score = 50000  # 場にカルボウがいない→最優先
                             else:
-                                score = 15000
+                                score = 5000  # カルボウがいるならソウブレイズex優先
                         elif card.id == Ceruledge_ex:
                             if field_counts[Charcadet] > 0 and field_counts[Ceruledge_ex] == 0:
-                                score = 50000  # パターンB
-                            elif can_evolve_charcadet:
-                                score = 40000
-                            elif need_more_ceruledge:
-                                score = 40000
+                                score = 45000  # カルボウはいるがソウブレイズexがいない
+                            elif field_counts[Ceruledge_ex] < 2:
+                                score = 40000  # ソウブレイズex2体未満→追加
                             else:
                                 score = 5000
                         elif card.id == Basic_Fire_Energy:
@@ -483,17 +635,19 @@ def agent(obs_dict):
                             else:
                                 score = 10000
                         elif card.id == Fezandipiti_ex:
-                            if field_counts[Ceruledge_ex] >= 1:
+                            if field_counts[Ceruledge_ex] >= 2 and not fezandipiti_on_field:
+                                score = 40000  # ソウブレイズex2体→キチキギスex
+                            elif field_counts[Ceruledge_ex] >= 1:
                                 score = 30000
-                            elif pre_ko:
-                                score = 5000
                             else:
                                 score = 100
                         elif card.id == Mogurew:
-                            if field_counts[Mogurew] >= 2:
-                                score = 5000
+                            if field_counts[Ceruledge_ex] >= 2 and fezandipiti_on_field and field_counts[Mogurew] < 2:
+                                score = 35000  # キチキギスも場にいる→モグリュー
+                            elif field_counts[Mogurew] < 2:
+                                score = 25000
                             else:
-                                score = 50000
+                                score = 5000
                         elif card.id == Budew:
                             if is_going_second_turn1 and field_counts[Budew] == 0:
                                 score = 60000
@@ -502,8 +656,12 @@ def agent(obs_dict):
                         elif card.id == Basic_Fighting_Energy:
                             # 闘エネは回収しない（トラッシュに残して火力にする）
                             score = -1
+                        elif card.id == Ogerpon_Hearth:
+                            score = UNNECESSARY if ogerpon_unnecessary else 3000
                         elif card.id == Night_Stretcher:
-                            if discard_counts[Ceruledge_ex] >= 1:
+                            if iwaparesu_mode and discard_counts.get(Ogerpon_Hearth, 0) >= 1:
+                                score = 55000
+                            elif discard_counts[Ceruledge_ex] >= 1:
                                 score = 30000
                             else:
                                 score = 5000
@@ -526,13 +684,17 @@ def agent(obs_dict):
                     card_data = card_table[card.id]
                     ctype = card_data.cardType
 
-                    if card.id == Ceruledge_ex or card.id == Charcadet:
+                    if card.id == Ogerpon_Hearth:
+                        score = 60000 if ogerpon_unnecessary else -200000
+                    elif card.id == Ceruledge_ex or card.id == Charcadet:
                         score = -200000
                     elif card.id == Budew:
                         score = -200000 if is_going_second_turn1 else 60000
                     elif ctype == CardType.POKEMON:
                         score = -150000
                     elif card.id == Perfect_Mixer:
+                        score = -200000
+                    elif card.id == Night_Stretcher and iwaparesu_mode:
                         score = -200000
                     elif ctype == CardType.SUPPORTER:
                         score = -200000
@@ -586,12 +748,14 @@ def agent(obs_dict):
 
             # --- ポケモン ---
             if card.id == Charcadet:
-                if main_pokemon_count >= 3:
+                if bench_count >= bench_max_for_others or main_pokemon_count >= 3:
                     score = -1
                 else:
                     score = 51000 if main_pokemon_count < 3 else 20000
             elif card.id == Mogurew:
-                if field_counts[Mogurew] < 2:
+                if bench_count >= bench_max_for_others:
+                    score = -1
+                elif field_counts[Mogurew] < 2:
                     score = 52000
                 else:
                     score = -1
@@ -600,30 +764,39 @@ def agent(obs_dict):
                     score = 55000
                 else:
                     score = -1
+            elif card.id == Ogerpon_Hearth:
+                if iwaparesu_mode:
+                    score = 54000
+                else:
+                    score = -1  # イワパレス確定以外はベンチに出さない
             elif card.id == Fezandipiti_ex:
-                score = 53000 if pre_ko else -1
+                score = 53000
 
             # --- グッズ ---
             elif card.id == Perfect_Mixer:
-                # 手札にあるなら最初に打つ
-                score = 95000
-            elif card.id == Buddy_Buddy_Poffin:
-                # ポフィンではカルボウとスボミーのみサーチ（モグリューはサーチしない）
-                if is_going_second_turn1:
-                    # 後1: スボミーがいなければカルボウ+スボミー、いればカルボウ2体
-                    if deck_counts[Budew] > 0 and field_counts[Budew] == 0:
-                        score = 48000
-                    elif deck_counts[Charcadet] > 0:
-                        score = 48000
-                    else:
-                        score = -1
-                elif deck_counts[Charcadet] > 0 and main_pokemon_count < 3:
-                    score = 46000
+                # 山札に闘エネルギーがある場合のみ使う
+                if deck_counts[Basic_Fighting_Energy] > 0:
+                    score = 95000
                 else:
                     score = -1
+            elif card.id == Buddy_Buddy_Poffin:
+                # ポフィン対象: 通常時カルボウのみ、イワパレスモード時オーガポン最優先
+                poffin_has_target = False
+                if iwaparesu_mode and deck_counts.get(Ogerpon_Hearth, 0) > 0 and field_counts[Ogerpon_Hearth] == 0:
+                    poffin_has_target = True
+                if deck_counts[Charcadet] > 0 and main_pokemon_count < 3:
+                    poffin_has_target = True
+                if is_going_second_turn1 and deck_counts[Budew] > 0 and field_counts[Budew] == 0:
+                    poffin_has_target = True
+                if not poffin_has_target:
+                    score = -1
+                else:
+                    score = 49000
             elif card.id == Poke_Pad:
-                # ポケパッド: カルボウ・モグリューをサーチ
-                if deck_counts[Mogurew] > 0 and field_counts[Mogurew] < 2:
+                # ポケパッド: カルボウ・モグリュー・オーガポンをサーチ
+                if iwaparesu_mode and deck_counts.get(Ogerpon_Hearth, 0) > 0 and field_counts[Ogerpon_Hearth] == 0:
+                    score = 46000
+                elif deck_counts[Mogurew] > 0 and field_counts[Mogurew] < 2:
                     score = 46000
                 elif deck_counts[Charcadet] > 0 and main_pokemon_count < 3:
                     score = 46000
@@ -653,14 +826,20 @@ def agent(obs_dict):
                                 discardable += 1
 
                 if discardable >= 2:
-                    score = 48000
+                    score = 45000
                 elif discardable >= 1 and main_pokemon_count <= 2:
                     score = 42000
                 else:
                     score = -1
             elif card.id == Night_Stretcher:
+                if iwaparesu_mode:
+                    # 対イワパレス時: トラッシュにオーガポンがいる場合のみ使用
+                    if discard_counts.get(Ogerpon_Hearth, 0) > 0:
+                        score = 44000
+                    else:
+                        score = -1
                 # リソース枯渇チェック
-                if fire_energy_scarce and discard_fire_energy_count > 0:
+                elif fire_energy_scarce and discard_fire_energy_count > 0:
                     score = 44000
                 elif ceruledge_scarce and need_more_ceruledge and discard_counts.get(Ceruledge_ex, 0) > 0:
                     score = 44000
@@ -676,13 +855,6 @@ def agent(obs_dict):
                     score = -1
             elif card.id == Switch:
                 score = 38000 if do_switch else -1
-            elif card.id == Battle_Colosseum:
-                if stadium_id > 0 and stadium_id != Battle_Colosseum:
-                    score = 80000
-                elif stadium_id == 0:
-                    score = 36000
-                else:
-                    score = -1
 
             # --- サポート ---
             elif card.id == Zeyu:
@@ -690,7 +862,10 @@ def agent(obs_dict):
             elif card.id == Lillie_Determination:
                 score = draw_support_score if card.id == use_support else -1
             elif card.id == Boss_Orders:
-                score = 35000 if card.id == use_support else -1
+                if card.id == use_support:
+                    score = 93000 if iwaparesu_mode else 35000
+                else:
+                    score = -1
 
         elif o.type == OptionType.ATTACH:
             card = get_card(o.area, o.index, my_index)
@@ -701,9 +876,21 @@ def agent(obs_dict):
             # 後攻1ターン目: にげるコスト用の手貼り
             if do_retreat_for_budew and is_active:
                 score = 85000
+            # オーガポンをバトル場に出すためのにげるコスト用手貼り
+            elif do_retreat_for_ogerpon and is_active and p_energy_count == 0:
+                score = 92000
             # アタッカー入れ替え用の手貼り
             elif do_retreat_for_attacker and is_active and p_energy_count == 0:
                 score = 92000
+            # キチキギスex退避用の手貼り
+            elif do_retreat_for_fezandipiti and is_active and p_energy_count == 0:
+                score = 92000
+            # 対イワパレス時: オーガポンにエネルギーを付ける（3枚まで）
+            elif iwaparesu_mode and op_active_is_iwaparesu and pokemon.id == Ogerpon_Hearth and card.id == Basic_Fire_Energy and p_energy_count < 3:
+                score = 86000
+            # オーガポンはエネルギー3枚まで付けられる
+            elif pokemon.id == Ogerpon_Hearth and card.id == Basic_Fire_Energy and p_energy_count < 3 and iwaparesu_mode:
+                score = 86000
             # エネルギーが1枚以上付いているポケモンには付けない
             elif p_energy_count >= 1:
                 score = -1
@@ -713,9 +900,15 @@ def agent(obs_dict):
                 score = 60000 + (1000 if is_active else 0)
             elif card.id == Basic_Fire_Energy:
                 if pokemon.id == Ceruledge_ex:
-                    score = 90000 if is_active else 86000
+                    if iwaparesu_mode and op_active_is_iwaparesu:
+                        score = -1  # イワパレスがバトル場にいるときはソウブレイズexに付けない
+                    else:
+                        score = 90000 if is_active else 86000
                 elif pokemon.id == Charcadet:
-                    score = 88000 if is_active else 84000
+                    if iwaparesu_mode and op_active_is_iwaparesu:
+                        score = -1
+                    else:
+                        score = 88000 if is_active else 84000
                 else:
                     score = -1
             else:
@@ -739,7 +932,11 @@ def agent(obs_dict):
         elif o.type == OptionType.RETREAT:
             if do_retreat_for_budew:
                 score = 82000
+            elif do_retreat_for_ogerpon:
+                score = 91000
             elif do_retreat_for_attacker:
+                score = 91000
+            elif do_retreat_for_fezandipiti:
                 score = 91000
             elif do_switch:
                 score = 10000
@@ -752,6 +949,9 @@ def agent(obs_dict):
         scores.append(score)
 
     # --- Build output ---
+    is_perfect_mixer_select = (context == SelectContext.TO_HAND
+                               and select.effect is not None
+                               and select.effect.id == Perfect_Mixer)
     output = []
     if len(scores) >= 1:
         sorted_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
@@ -760,7 +960,9 @@ def agent(obs_dict):
                 break
             if (sorted_scores[i][1] >= 0
                 or select.minCount > i
-                or (context != SelectContext.TO_BENCH and context != SelectContext.SETUP_BENCH_POKEMON)):
+                or (context != SelectContext.TO_BENCH
+                    and context != SelectContext.SETUP_BENCH_POKEMON
+                    and not is_perfect_mixer_select)):
                 output.append(sorted_scores[i][0])
 
     # Safety: always return at least minCount items
