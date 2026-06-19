@@ -5,7 +5,8 @@ from collections import defaultdict
 from cg.api import AreaType, CardType, Log, LogType, Observation, SelectContext, OptionType, Card, Pokemon, State, all_card_data, to_observation_class
 
 """
-Ceruledge ex (ソウブレイズex) Deck
+Ceruledge ex (ソウブレイズex) Deck - v3
+モグリュー + 闘エネルギー + パーフェクトミキサーによるトラッシュ加速型
 """
 
 # Load deck.csv
@@ -25,29 +26,26 @@ card_table = {c.cardId: c for c in all_card}
 # === Card ID Constants ===
 Charcadet = 796
 Ceruledge_ex = 320
+Mogurew = 81
 Budew = 235
 Fezandipiti_ex = 140
 Ultra_Ball = 1121
 Buddy_Buddy_Poffin = 1086
-Crushing_Hammer = 1120
+Poke_Pad = 1152
+Fight_Gong = 1142
 Night_Stretcher = 1097
 Switch = 1123
-Unfair_Stamp = 1080
+Perfect_Mixer = 1128
 Zeyu = 1192
 Lillie_Determination = 1227
 Boss_Orders = 1182
-Aoki_Tegiwa = 1206
 Battle_Colosseum = 1264
 Basic_Fire_Energy = 2
+Basic_Fighting_Energy = 6
 
 UNNECESSARY = -10000000
 
 # === Global State ===
-_can_switch = False
-_can_attack = False
-_can_main_attack = False
-_use_support = 0
-_bench_attacker = False
 _pre_turn_log = []
 _current_turn_log = []
 _prize = []
@@ -60,7 +58,6 @@ def agent(obs_dict):
     if obs.select is None:
         return my_deck
 
-    global _can_switch, _can_attack, _can_main_attack, _use_support, _bench_attacker
     global _pre_turn_log, _current_turn_log
 
     state = obs.current
@@ -70,7 +67,7 @@ def agent(obs_dict):
     my_state = state.players[my_index]
     op_state = state.players[1 - my_index]
 
-    # --- Helper functions (inside agent to avoid Kaggle picking them up) ---
+    # --- Helper functions ---
 
     def prize_count(pokemon, is_attack_damage):
         data = card_table[pokemon.id]
@@ -96,8 +93,8 @@ def agent(obs_dict):
         score += pokemon.hp
         return score
 
-    def calc_damage(discard_energy_count):
-        return 30 + 20 * discard_energy_count
+    def calc_damage(energy_count):
+        return 30 + 20 * energy_count
 
     def add_card_count(card, mi):
         if card is None:
@@ -154,95 +151,6 @@ def agent(obs_dict):
             return state.looking[index]
         return None
 
-    def hand_score_eval(cid, ignore_count):
-        score = 0
-        if cid == Charcadet:
-            score = 18000 if main_pokemon_count < 3 else 1000
-        elif cid == Ceruledge_ex:
-            if can_evolve_charcadet:
-                if field_counts[Ceruledge_ex] == 0:
-                    score = 40000
-                elif field_counts[Ceruledge_ex] == 1:
-                    score = 15000
-                else:
-                    score = 50
-            else:
-                score = 3000
-        elif cid == Budew:
-            if field_counts[Budew] >= 1 or state.turn >= 3:
-                score = UNNECESSARY
-            elif state.turn <= 2:
-                score = 25000
-            else:
-                score = 100
-        elif cid == Fezandipiti_ex:
-            score = 50000 if pre_ko else 5
-        elif cid == Unfair_Stamp:
-            if pre_ko:
-                score = 80000
-            elif len(op_state.prize) <= 2:
-                score = UNNECESSARY
-            else:
-                score = 80
-        elif cid == Buddy_Buddy_Poffin:
-            if deck_counts[Charcadet] > 0:
-                score = 35000
-            elif state.turn <= 2 and deck_counts[Budew] > 0:
-                score = 30000
-            else:
-                score = UNNECESSARY
-        elif cid == Ultra_Ball:
-            score = 70 if (main_pokemon_count <= 2 or field_counts[Charcadet] >= 1) else 5
-        elif cid == Night_Stretcher:
-            if discard_counts[Ceruledge_ex] >= 1 and field_counts[Ceruledge_ex] == 0:
-                score = 30000
-            elif discard_counts[Charcadet] >= 1 and main_pokemon_count <= 1:
-                score = 25000
-            else:
-                score = 50
-        elif cid == Crushing_Hammer:
-            score = 20
-        elif cid == Switch:
-            score = 15
-        elif cid == Boss_Orders:
-            score = 60000
-        elif cid == Zeyu:
-            score = 45000 if (ignore_count or support_count == 0) else 10
-        elif cid == Aoki_Tegiwa:
-            score = 40000 if (ignore_count or support_count == 0) else 10
-        elif cid == Lillie_Determination:
-            score = 35000 if (ignore_count or support_count == 0) else 10
-        elif cid == Battle_Colosseum:
-            score = 4000 if (stadium_id != 0 and stadium_id != Battle_Colosseum) else 100
-        elif cid == Basic_Fire_Energy:
-            score = 10000
-        if not ignore_count and hand_counts.get(cid, 0) > 0:
-            if cid == Charcadet:
-                score -= 100
-            elif cid == Basic_Fire_Energy:
-                score -= 50
-            else:
-                score -= 100000
-        return score
-
-    def attach_score_eval(attach_id, pokemon, active):
-        energy_count = len(pokemon.energies)
-        if card_table[attach_id].cardType == CardType.TOOL:
-            return 60000 + (1000 if active else 0)
-        if pokemon.id == Budew or pokemon.id == Fezandipiti_ex:
-            return -1
-        if pokemon.id == Ceruledge_ex:
-            if energy_count == 0:
-                return 25000 + (5000 if active else 0)
-            else:
-                return -1
-        if pokemon.id == Charcadet:
-            if energy_count == 0 and active and not _bench_attacker:
-                return 18000
-            else:
-                return -1
-        return -1
-
     # --- Log tracking ---
     if state.turn == 0:
         _prize.clear()
@@ -256,12 +164,8 @@ def agent(obs_dict):
                 _current_turn_log = []
 
     pre_ko = False
-    no_item = False
     for log in _pre_turn_log:
-        if log.type == LogType.ATTACK:
-            if log.attackId == 323:
-                no_item = True
-        elif log.type == LogType.MOVE_CARD:
+        if log.type == LogType.MOVE_CARD:
             if (log.playerIndex == my_index
                 and (log.fromArea == AreaType.BENCH or log.fromArea == AreaType.ACTIVE)
                 and log.toArea == AreaType.DISCARD):
@@ -290,7 +194,9 @@ def agent(obs_dict):
 
     active_id = 0
     can_evolve_charcadet = False
-    _bench_attacker = False
+    bench_attacker = False
+    has_fire_energy_on_field = False
+    field_fire_energy_count = 0
 
     for card in my_state.active:
         if card is None:
@@ -299,65 +205,159 @@ def agent(obs_dict):
         field_counts[card.id] += 1
         if not card.appearThisTurn and card.id == Charcadet:
             can_evolve_charcadet = True
+        for ec in card.energyCards:
+            if ec.id == Basic_Fire_Energy:
+                has_fire_energy_on_field = True
+                field_fire_energy_count += 1
     for card in my_state.bench:
         field_counts[card.id] += 1
         if not card.appearThisTurn and card.id == Charcadet:
             can_evolve_charcadet = True
         if card.id == Ceruledge_ex and len(card.energies) >= 1:
-            _bench_attacker = True
+            bench_attacker = True
+        for ec in card.energyCards:
+            if ec.id == Basic_Fire_Energy:
+                has_fire_energy_on_field = True
+                field_fire_energy_count += 1
+
+    hand_energy_count = 0
+    hand_fire_energy_count = 0
+    hand_fighting_energy_count = 0
+    hand_budew_count = 0
 
     for card in my_state.hand:
         hand_counts[card.id] += 1
+        ctype = card_table[card.id].cardType
+        if ctype == CardType.BASIC_ENERGY:
+            hand_energy_count += 1
+            if card.id == Basic_Fire_Energy:
+                hand_fire_energy_count += 1
+            elif card.id == Basic_Fighting_Energy:
+                hand_fighting_energy_count += 1
+        if card.id == Budew:
+            hand_budew_count += 1
 
+    hand_size = len(my_state.hand)
+
+    # バトル場のアタッカーに炎エネルギーが付いているか
+    active_has_fire_energy = False
+    for card in my_state.active:
+        if card is not None and card.id in (Ceruledge_ex, Charcadet):
+            for ec in card.energyCards:
+                if ec.id == Basic_Fire_Energy:
+                    active_has_fire_energy = True
+
+    discard_fire_energy_count = 0
     for card in my_state.discard:
         discard_counts[card.id] += 1
         if card_table[card.id].cardType == CardType.BASIC_ENERGY:
             discard_energy_count += 1
+        if card.id == Basic_Fire_Energy:
+            discard_fire_energy_count += 1
 
     main_pokemon_count = field_counts[Charcadet] + field_counts[Ceruledge_ex]
     current_damage = calc_damage(discard_energy_count)
+
+    # リソース枯渇チェック（夜のタンカ用）
+    # 炎エネ: デッキ7枚のうち、場+手札にないもの = 山札+サイド+トラッシュ
+    fire_energy_available = field_fire_energy_count + hand_fire_energy_count
+    fire_energy_scarce = fire_energy_available <= 2 and discard_fire_energy_count >= 5
+
+    # ソウブレイズex: デッキ4枚のうち、場+手札にあるもの
+    ceruledge_available = field_counts[Ceruledge_ex] + hand_counts.get(Ceruledge_ex, 0)
+    ceruledge_in_trash = discard_counts.get(Ceruledge_ex, 0)
+    ceruledge_scarce = ceruledge_in_trash >= 3
+
+    # 追加のソウブレイズexが必要か
+    op_remaining_prizes = len(op_state.prize)
+    needed_ceruledge = (op_remaining_prizes + 1) // 2  # ceil(prizes / 2)
+    need_more_ceruledge = field_counts[Ceruledge_ex] < needed_ceruledge
 
     stadium_id = 0
     for card in state.stadium:
         stadium_id = card.id
 
-    support_count = 0
-    for card in my_state.hand:
-        if card_table[card.id].cardType == CardType.SUPPORTER and card.id != Boss_Orders:
-            support_count += 1
+    # 後攻1ターン目かどうか
+    is_going_second_turn1 = (state.turn <= 1 and my_index != state.firstPlayer)
+    # ベンチにスボミーがいるか
+    budew_on_bench = any(card.id == Budew for card in my_state.bench)
 
-    # --- Determine available actions in MAIN context ---
-    _can_switch = False
-    _can_attack = False
-    _can_main_attack = False
-    if context == SelectContext.MAIN:
+    # 後1でスボミーをバトル場に出すためのにげる判定
+    do_retreat_for_budew = (is_going_second_turn1
+                           and budew_on_bench
+                           and active_id != Budew)
+
+    # アタッカー入れ替え: ベンチにエネ付きソウブレイズexがいて、バトル場が非アタッカー
+    do_retreat_for_attacker = (not do_retreat_for_budew
+                               and active_id != Ceruledge_ex
+                               and active_id != Budew
+                               and bench_attacker)
+
+    # --- ボスの指令でワンパンできる相手exがいるか ---
+    can_boss_ko_ex = False
+    for card in op_state.bench:
+        if card_table[card.id].ex and card.hp <= current_damage:
+            can_boss_ko_ex = True
+
+    # --- サポート選択ロジック ---
+    playable_supporters = set()
+    if context == SelectContext.MAIN and not state.supporterPlayed:
         for o in select.option:
-            if o.type == OptionType.RETREAT:
-                _can_switch = True
-            elif o.type == OptionType.ATTACK:
-                _can_attack = True
-                if active_id == Ceruledge_ex:
-                    _can_main_attack = True
+            if o.type == OptionType.PLAY:
+                card = get_card(AreaType.HAND, o.index, my_index)
+                if card_table[card.id].cardType == CardType.SUPPORTER:
+                    playable_supporters.add(card.id)
 
-        _use_support = 0
-        if not state.supporterPlayed:
-            sup_score = 0
-            for o in select.option:
-                if o.type == OptionType.PLAY:
-                    card = get_card(AreaType.HAND, o.index, my_index)
-                    if card_table[card.id].cardType == CardType.SUPPORTER:
-                        sc = hand_score_eval(card.id, True)
-                        if sup_score < sc:
-                            sup_score = sc
-                            _use_support = card.id
+    # ゼイユ使用条件: 捨てられるカード > 捨てたくないカード
+    zeyu_discardable = hand_fighting_energy_count
+    if discard_fire_energy_count < 4:
+        zeyu_discardable += hand_fire_energy_count
+    if not is_going_second_turn1:
+        zeyu_discardable += hand_budew_count
+    zeyu_undiscardable = 0
+    for card in my_state.hand:
+        if card.id in (Ceruledge_ex, Charcadet, Perfect_Mixer):
+            zeyu_undiscardable += 1
+        elif card_table[card.id].cardType == CardType.SUPPORTER and card.id != Zeyu:
+            zeyu_undiscardable += 1
+    zeyu_preferred = zeyu_discardable > zeyu_undiscardable
 
-    # スボミーがバトル場にいる間はグッズロックを続けるため入れ替えない
+    use_support = 0
+    if not state.supporterPlayed:
+        if can_boss_ko_ex and Boss_Orders in playable_supporters:
+            use_support = Boss_Orders
+        elif zeyu_preferred and Zeyu in playable_supporters:
+            use_support = Zeyu
+        elif Lillie_Determination in playable_supporters:
+            use_support = Lillie_Determination
+        elif Zeyu in playable_supporters:
+            use_support = Zeyu
+
+    # --- にげる判定 ---
     if active_id == Budew:
         do_switch = False
+    elif do_retreat_for_budew:
+        do_switch = True
+    elif do_retreat_for_attacker:
+        do_switch = True
     else:
-        do_switch = (not _can_main_attack
-                     and active_id != Ceruledge_ex
-                     and _bench_attacker)
+        do_switch = False
+
+    # --- ドローソースのスコア制御 ---
+    has_playable_cards = False
+    if context == SelectContext.MAIN:
+        for o in select.option:
+            if o.type == OptionType.PLAY:
+                card = get_card(AreaType.HAND, o.index, my_index)
+                ctype = card_table[card.id].cardType
+                if ctype != CardType.SUPPORTER and ctype != CardType.BASIC_ENERGY:
+                    has_playable_cards = True
+                    break
+            elif o.type == OptionType.EVOLVE:
+                has_playable_cards = True
+                break
+
+    draw_support_score = 14000 if has_playable_cards else 90000
 
     # --- Score each option ---
     scores = []
@@ -390,10 +390,12 @@ def agent(obs_dict):
                         elif card.id == Budew:
                             if context == SelectContext.SETUP_ACTIVE_POKEMON:
                                 score += 100000 if my_index != state.firstPlayer else 5000
-                            elif not _bench_attacker:
-                                score += 30000
+                            elif do_retreat_for_budew:
+                                score += 100000
                             else:
                                 score += 3000
+                        elif card.id == Mogurew:
+                            score += 2000
                         elif card.id == Fezandipiti_ex:
                             score += 1000
                         score += energy_count * 1000 + hp
@@ -403,57 +405,158 @@ def agent(obs_dict):
                             score += 50000
 
                 elif context == SelectContext.SETUP_BENCH_POKEMON:
-                    score = 10000 if card.id == Charcadet else -1
+                    # バトル開始前はモグリューを出さない
+                    if card.id == Charcadet:
+                        score = 10000
+                    else:
+                        score = -1
 
                 elif context == SelectContext.TO_BENCH:
-                    if card.id == Charcadet:
-                        score = 20000 if main_pokemon_count < 3 else 5000
-                    elif card.id == Budew:
-                        score = 18000 if (field_counts[Budew] == 0 and state.turn <= 2) else -1
+                    if card.id == Budew:
+                        if is_going_second_turn1 and field_counts[Budew] == 0:
+                            score = 100000
+                        else:
+                            score = -1
+                    elif card.id == Charcadet:
+                        if main_pokemon_count >= 3:
+                            # アタッカー3体以上→出さない。キチキギスex用にベンチ枠を空ける
+                            score = -1
+                        elif main_pokemon_count <= 1:
+                            score = 50000
+                        elif field_counts[Charcadet] < 2:
+                            score = 20000
+                        else:
+                            score = 5000
+                    elif card.id == Mogurew:
+                        if main_pokemon_count >= 2 and field_counts[Charcadet] >= 2:
+                            score = 40000
+                        elif main_pokemon_count >= 2:
+                            score = 30000
+                        else:
+                            score = 8000
+                    elif card.id == Fezandipiti_ex:
+                        score = 1000 if pre_ko else -1
                     else:
                         score = 1000
 
                 elif context == SelectContext.TO_HAND:
-                    score = hand_score_eval(card.id, False)
-                    hand_counts[card.id] += 1
+                    # きぜつ後のサーチ優先度 + パーフェクトミキサーのトラッシュ選択
+                    if select.effect is not None and select.effect.id == Perfect_Mixer:
+                        # パーフェクトミキサーでのトラッシュ選択
+                        if card.id == Basic_Fighting_Energy:
+                            score = 100000
+                        elif card.id == Budew and not is_going_second_turn1:
+                            score = 80000
+                        elif card.id == Basic_Fire_Energy:
+                            score = 70000 if field_fire_energy_count >= 3 else -1
+                        else:
+                            score = -1
+                    else:
+                        # 通常のサーチ先選択
+                        # リソース枯渇チェック（夜のタンカ用）
+                        if card.id == Basic_Fire_Energy and fire_energy_scarce:
+                            score = 70000
+                        elif card.id == Ceruledge_ex and ceruledge_scarce and need_more_ceruledge:
+                            score = 65000
+                        # アタッカー準備のボトルネック
+                        elif card.id == Charcadet:
+                            if field_counts[Charcadet] == 0 and field_counts[Ceruledge_ex] == 0:
+                                score = 50000  # パターンA
+                            elif main_pokemon_count <= 1:
+                                score = 50000
+                            elif main_pokemon_count >= 3:
+                                score = 1000
+                            else:
+                                score = 15000
+                        elif card.id == Ceruledge_ex:
+                            if field_counts[Charcadet] > 0 and field_counts[Ceruledge_ex] == 0:
+                                score = 50000  # パターンB
+                            elif can_evolve_charcadet:
+                                score = 40000
+                            elif need_more_ceruledge:
+                                score = 40000
+                            else:
+                                score = 5000
+                        elif card.id == Basic_Fire_Energy:
+                            if not active_has_fire_energy and hand_fire_energy_count == 0:
+                                score = 60000  # パターンC
+                            else:
+                                score = 10000
+                        elif card.id == Fezandipiti_ex:
+                            if field_counts[Ceruledge_ex] >= 1:
+                                score = 30000
+                            elif pre_ko:
+                                score = 5000
+                            else:
+                                score = 100
+                        elif card.id == Mogurew:
+                            if field_counts[Mogurew] >= 2:
+                                score = 5000
+                            else:
+                                score = 50000
+                        elif card.id == Budew:
+                            if is_going_second_turn1 and field_counts[Budew] == 0:
+                                score = 60000
+                            else:
+                                score = UNNECESSARY
+                        elif card.id == Basic_Fighting_Energy:
+                            # 闘エネは回収しない（トラッシュに残して火力にする）
+                            score = -1
+                        elif card.id == Night_Stretcher:
+                            if discard_counts[Ceruledge_ex] >= 1:
+                                score = 30000
+                            else:
+                                score = 5000
+                        else:
+                            ctype = card_table[card.id].cardType
+                            if ctype == CardType.SUPPORTER:
+                                score = 8000
+                            else:
+                                score = 3000
+                        # 重複チェック
+                        if hand_counts.get(card.id, 0) > 0:
+                            if card.id in (Charcadet, Basic_Fire_Energy, Basic_Fighting_Energy):
+                                score -= 100
+                            else:
+                                score -= 100000
+                        hand_counts[card.id] += 1
 
                 elif context == SelectContext.DISCARD:
                     hand_counts[card.id] -= 1
-                    if card_table[card.id].cardType == CardType.SUPPORTER:
-                        support_count -= 1
-                    # ポケモンとACE SPECは絶対に捨てない
                     card_data = card_table[card.id]
-                    if card_data.cardType == CardType.POKEMON:
-                        score = -200000
-                    elif card.id == Unfair_Stamp or card.id == Crushing_Hammer:
-                        score = -200000
-                    elif card.id == Basic_Fire_Energy:
-                        # このエネを捨てたら相手バトル場を倒せるか判定
-                        op_active_hp = 0
-                        if op_state.active and op_state.active[0] is not None:
-                            op_active_hp = op_state.active[0].hp
-                        damage_if_discard = calc_damage(discard_energy_count + 1)
-                        can_ko_if_discard = (op_active_hp > 0 and damage_if_discard >= op_active_hp
-                                             and current_damage < op_active_hp)
+                    ctype = card_data.cardType
 
-                        if can_ko_if_discard:
-                            # 捨てれば倒せる → サイドを進めることを最優先
+                    if card.id == Ceruledge_ex or card.id == Charcadet:
+                        score = -200000
+                    elif card.id == Budew:
+                        score = -200000 if is_going_second_turn1 else 60000
+                    elif ctype == CardType.POKEMON:
+                        score = -150000
+                    elif card.id == Perfect_Mixer:
+                        score = -200000
+                    elif ctype == CardType.SUPPORTER:
+                        score = -200000
+                    elif card.id == Basic_Fighting_Energy:
+                        score = 110000
+                    elif card.id == Basic_Fire_Energy:
+                        if discard_fire_energy_count >= 4:
+                            # トラッシュに炎エネが4枚以上→これ以上捨てない
+                            score = -50000
+                        elif has_fire_energy_on_field:
+                            score = 100000
+                        elif hand_fire_energy_count >= 2:
                             score = 100000
                         else:
-                            # ベンチにエネ付きソウブレイズexがいれば予備アタッカーがいるので全部捨ててOK
-                            has_bench_backup = any(
-                                bc.id == Ceruledge_ex and len(bc.energies) >= 1
-                                for bc in my_state.bench
-                            )
-                            if has_bench_backup:
-                                score = 100000
-                            elif not state.energyAttached and hand_counts.get(Basic_Fire_Energy, 0) <= 0:
-                                # 予備アタッカーなし＆まだ手貼りしていない＆最後の1枚 → 残す
-                                score = -50000
-                            else:
-                                score = 100000
+                            score = -50000
+                    elif ctype == CardType.BASIC_ENERGY:
+                        score = 100000
                     else:
-                        score = -hand_score_eval(card.id, False)
+                        if card.id == Buddy_Buddy_Poffin and state.turn >= 3:
+                            score = 50000
+                        elif card.id == Fight_Gong and field_counts[Mogurew] >= 2:
+                            score = 50000
+                        else:
+                            score = -10000
 
                 elif context == SelectContext.DAMAGE_COUNTER or context == SelectContext.DAMAGE_COUNTER_ANY:
                     if hp > 0:
@@ -481,39 +584,96 @@ def agent(obs_dict):
         elif o.type == OptionType.PLAY:
             card = get_card(AreaType.HAND, o.index, my_index)
 
+            # --- ポケモン ---
             if card.id == Charcadet:
-                score = 51000 if main_pokemon_count < 3 else 20000
+                if main_pokemon_count >= 3:
+                    score = -1
+                else:
+                    score = 51000 if main_pokemon_count < 3 else 20000
+            elif card.id == Mogurew:
+                if field_counts[Mogurew] < 2:
+                    score = 52000
+                else:
+                    score = -1
             elif card.id == Budew:
-                score = 52000 if (field_counts[Budew] == 0 and state.turn <= 2) else -1
+                if is_going_second_turn1 and field_counts[Budew] == 0:
+                    score = 55000
+                else:
+                    score = -1
             elif card.id == Fezandipiti_ex:
                 score = 53000 if pre_ko else -1
-            elif card.id == Unfair_Stamp:
-                if pre_ko:
-                    score = 80000
-                elif len(op_state.prize) <= 2:
-                    score = UNNECESSARY
-                else:
-                    score = 80
+
+            # --- グッズ ---
+            elif card.id == Perfect_Mixer:
+                # 手札にあるなら最初に打つ
+                score = 95000
             elif card.id == Buddy_Buddy_Poffin:
-                score = 46000 if (deck_counts[Charcadet] > 0 or (state.turn <= 2 and deck_counts[Budew] > 0)) else -1
-            elif card.id == Ultra_Ball:
-                if hand_counts[Basic_Fire_Energy] >= 2:
-                    score = 48000
-                elif hand_counts[Basic_Fire_Energy] >= 1:
-                    score = 44000
-                elif main_pokemon_count <= 2:
-                    score = 42000
+                # ポフィンではカルボウとスボミーのみサーチ（モグリューはサーチしない）
+                if is_going_second_turn1:
+                    # 後1: スボミーがいなければカルボウ+スボミー、いればカルボウ2体
+                    if deck_counts[Budew] > 0 and field_counts[Budew] == 0:
+                        score = 48000
+                    elif deck_counts[Charcadet] > 0:
+                        score = 48000
+                    else:
+                        score = -1
+                elif deck_counts[Charcadet] > 0 and main_pokemon_count < 3:
+                    score = 46000
                 else:
-                    score = 30
-            elif card.id == Night_Stretcher:
-                if discard_counts[Ceruledge_ex] >= 1 and field_counts[Ceruledge_ex] == 0:
-                    score = 42000
-                elif discard_counts[Charcadet] >= 1 and main_pokemon_count <= 1:
+                    score = -1
+            elif card.id == Poke_Pad:
+                # ポケパッド: カルボウ・モグリューをサーチ
+                if deck_counts[Mogurew] > 0 and field_counts[Mogurew] < 2:
+                    score = 46000
+                elif deck_counts[Charcadet] > 0 and main_pokemon_count < 3:
+                    score = 46000
+                else:
+                    score = -1
+            elif card.id == Fight_Gong:
+                if deck_counts[Mogurew] > 0 and field_counts[Mogurew] < 2:
+                    score = 47000
+                elif deck_counts[Basic_Fighting_Energy] > 0:
+                    score = 45000
+                else:
+                    score = -1
+            elif card.id == Ultra_Ball:
+                discardable = hand_fighting_energy_count
+                if has_fire_energy_on_field or hand_fire_energy_count >= 2:
+                    discardable += hand_fire_energy_count
+                else:
+                    discardable += max(0, hand_fire_energy_count - 1)
+                for hc in my_state.hand:
+                    hcid = hc.id
+                    hctype = card_table[hcid].cardType
+                    if hctype not in (CardType.POKEMON, CardType.SUPPORTER, CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
+                        if hcid not in (Perfect_Mixer, Ultra_Ball):
+                            if hcid == Buddy_Buddy_Poffin and state.turn >= 3:
+                                discardable += 1
+                            elif hcid == Fight_Gong and field_counts[Mogurew] >= 2:
+                                discardable += 1
+
+                if discardable >= 2:
+                    score = 48000
+                elif discardable >= 1 and main_pokemon_count <= 2:
                     score = 42000
                 else:
                     score = -1
-            elif card.id == Crushing_Hammer:
-                score = 40000
+            elif card.id == Night_Stretcher:
+                # リソース枯渇チェック
+                if fire_energy_scarce and discard_fire_energy_count > 0:
+                    score = 44000
+                elif ceruledge_scarce and need_more_ceruledge and discard_counts.get(Ceruledge_ex, 0) > 0:
+                    score = 44000
+                # アタッカー準備のボトルネック
+                elif main_pokemon_count == 0 and discard_counts.get(Charcadet, 0) > 0:
+                    score = 44000  # パターンA
+                elif field_counts[Charcadet] > 0 and field_counts[Ceruledge_ex] == 0 and discard_counts.get(Ceruledge_ex, 0) > 0:
+                    score = 44000  # パターンB
+                elif not active_has_fire_energy and hand_fire_energy_count == 0 and discard_fire_energy_count > 0:
+                    score = 44000  # パターンC
+                # ソウブレイズexも炎エネも足りているなら使わない
+                else:
+                    score = -1
             elif card.id == Switch:
                 score = 38000 if do_switch else -1
             elif card.id == Battle_Colosseum:
@@ -523,19 +683,43 @@ def agent(obs_dict):
                     score = 36000
                 else:
                     score = -1
+
+            # --- サポート ---
             elif card.id == Zeyu:
-                score = 35000 if card.id == _use_support else -1
-            elif card.id == Aoki_Tegiwa:
-                score = 35000 if card.id == _use_support else -1
+                score = draw_support_score if card.id == use_support else -1
             elif card.id == Lillie_Determination:
-                score = 14000 if card.id == _use_support else -1
+                score = draw_support_score if card.id == use_support else -1
             elif card.id == Boss_Orders:
-                score = 35000 if card.id == _use_support else -1
+                score = 35000 if card.id == use_support else -1
 
         elif o.type == OptionType.ATTACH:
             card = get_card(o.area, o.index, my_index)
             pokemon = get_card(o.inPlayArea, o.inPlayIndex, my_index)
-            score = attach_score_eval(card.id, pokemon, o.inPlayArea == AreaType.ACTIVE)
+            is_active = o.inPlayArea == AreaType.ACTIVE
+            p_energy_count = len(pokemon.energies)
+
+            # 後攻1ターン目: にげるコスト用の手貼り
+            if do_retreat_for_budew and is_active:
+                score = 85000
+            # アタッカー入れ替え用の手貼り
+            elif do_retreat_for_attacker and is_active and p_energy_count == 0:
+                score = 92000
+            # エネルギーが1枚以上付いているポケモンには付けない
+            elif p_energy_count >= 1:
+                score = -1
+            elif card.id == Basic_Fighting_Energy:
+                score = -1
+            elif card_table[card.id].cardType == CardType.TOOL:
+                score = 60000 + (1000 if is_active else 0)
+            elif card.id == Basic_Fire_Energy:
+                if pokemon.id == Ceruledge_ex:
+                    score = 90000 if is_active else 86000
+                elif pokemon.id == Charcadet:
+                    score = 88000 if is_active else 84000
+                else:
+                    score = -1
+            else:
+                score = -1
 
         elif o.type == OptionType.EVOLVE:
             pokemon = get_card(o.inPlayArea, o.inPlayIndex, my_index)
@@ -543,10 +727,24 @@ def agent(obs_dict):
 
         elif o.type == OptionType.ABILITY:
             card = get_card(o.area, o.index, my_index)
-            score = 1 if card.id == 1267 else 40000
+            if card.id == Mogurew:
+                score = 60000
+            elif card.id == Fezandipiti_ex:
+                score = 75000 if pre_ko else 40000
+            elif card.id == 1267:
+                score = 1
+            else:
+                score = 40000
 
         elif o.type == OptionType.RETREAT:
-            score = 10000 if do_switch else -1
+            if do_retreat_for_budew:
+                score = 82000
+            elif do_retreat_for_attacker:
+                score = 91000
+            elif do_switch:
+                score = 10000
+            else:
+                score = -1
 
         elif o.type == OptionType.ATTACK:
             score = o.attackId if o.attackId > 0 else 1
