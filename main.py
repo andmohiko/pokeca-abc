@@ -46,6 +46,13 @@ Iwaparesu = 345
 Basic_Grass_Energy = 1
 Basic_Fire_Energy = 2
 Basic_Fighting_Energy = 6
+# 主要デッキの進化前
+Dreepy = 119       # ドラメシヤ
+Drakloak = 120     # ドロンチ
+Riolu_A = 333      # リオル
+Riolu_B = 677      # リオル
+Riolu_C = 974      # リオル
+PRE_EVOLUTIONS = {Dreepy, Drakloak, Riolu_A, Riolu_B, Riolu_C, Ishizumai_A, Ishizumai_B}
 
 UNNECESSARY = -10000000
 
@@ -204,6 +211,7 @@ def agent(obs_dict):
     has_fire_energy_on_field = False
     field_fire_energy_count = 0
     ogerpon_fire_energy_count = 0
+    ogerpon_total_energy_count = 0
     ogerpon_on_bench = False
 
     for card in my_state.active:
@@ -214,6 +222,7 @@ def agent(obs_dict):
         if not card.appearThisTurn and card.id == Charcadet:
             can_evolve_charcadet = True
         if card.id == Ogerpon_Hearth:
+            ogerpon_total_energy_count = len(card.energies)
             for ec in card.energyCards:
                 if ec.id == Basic_Fire_Energy:
                     ogerpon_fire_energy_count += 1
@@ -229,6 +238,7 @@ def agent(obs_dict):
             bench_attacker = True
         if card.id == Ogerpon_Hearth:
             ogerpon_on_bench = True
+            ogerpon_total_energy_count = len(card.energies)
             for ec in card.energyCards:
                 if ec.id == Basic_Fire_Energy:
                     ogerpon_fire_energy_count += 1
@@ -299,7 +309,7 @@ def agent(obs_dict):
         if card.id == Ceruledge_ex and len(card.energies) >= 1:
             ceruledge_with_energy += 1
     ideal_board = ceruledge_with_energy >= 2
-    lo_danger = my_state.deckCount <= 8
+    lo_danger = my_state.deckCount <= 12
 
     # キチキギスex用のベンチ枠予約
     fezandipiti_on_field = field_counts[Fezandipiti_ex] > 0
@@ -356,45 +366,100 @@ def agent(obs_dict):
                            and budew_on_bench
                            and active_id != Budew)
 
-    # オーガポンをバトル場に出すためのにげる判定
-    do_retreat_for_ogerpon = (iwaparesu_mode
-                              and op_active_is_iwaparesu
-                              and ogerpon_on_bench
-                              and ogerpon_fire_energy_count >= 3
-                              and active_id != Ogerpon_Hearth)
+    # オーガポンの準備状態（炎2+総3）
+    ogerpon_ready = ogerpon_fire_energy_count >= 2 and ogerpon_total_energy_count >= 3
 
-    # アタッカー入れ替え: ベンチにエネ付きソウブレイズexがいて、バトル場が非アタッカー
-    do_retreat_for_attacker = (not do_retreat_for_budew
-                               and not do_retreat_for_ogerpon
-                               and active_id != Ceruledge_ex
-                               and active_id != Budew
-                               and bench_attacker)
+    # do_retreat_for_ogerpon は use_support 決定後に設定（Boss使用時はオーガポンを出さない）
+    do_retreat_for_ogerpon = False
 
-    # キチキギスexがバトル場に出た場合のにげる判定
-    do_retreat_for_fezandipiti = (active_id == Fezandipiti_ex
-                                  and not do_retreat_for_budew
-                                  and not do_retreat_for_ogerpon
-                                  and not do_retreat_for_attacker
-                                  and len(my_state.bench) > 0)
+    # --- リーサル判定（行動ごとに毎回評価） ---
+    my_remaining_prizes = len(my_state.prize)
 
-    # --- ボスの指令でワンパンできる相手exがいるか ---
-    can_boss_ko_ex = False
+    # 手札からトラッシュ可能なエネルギー枚数
+    hand_trashable_energy = hand_fighting_energy_count
+    if has_fire_energy_on_field:
+        hand_trashable_energy += hand_fire_energy_count
+    elif hand_fire_energy_count >= 2:
+        hand_trashable_energy += hand_fire_energy_count - 1  # 1枚は手貼り用に残す
+
+    # パーフェクトミキサーの追加トラッシュ
+    mixer_potential = min(5, deck_counts.get(Basic_Fighting_Energy, 0)) if hand_counts.get(Perfect_Mixer, 0) > 0 else 0
+
+    # 手札ベースでサポート/グッズの有無を判定（コンテキスト非依存）
+    hand_has_boss = hand_counts.get(Boss_Orders, 0) > 0 and not state.supporterPlayed
+    hand_has_zeyu = hand_counts.get(Zeyu, 0) > 0 and not state.supporterPlayed
+    hand_has_hyper_ball = hand_counts.get(Ultra_Ball, 0) > 0
+
+    # サポートなしでトラッシュ可能（ハイパーボール: 最大2枚）
+    no_supporter_trashable = min(hand_trashable_energy, 2) if hand_has_hyper_ball else 0
+
+    # サポート(ゼイユ)ありでトラッシュ可能
+    with_supporter_trashable = hand_trashable_energy if (hand_has_zeyu or hand_has_hyper_ball) else 0
+
+    # 最大打点（バトル場KO用: ゼイユ使用可）
+    max_damage_active = calc_damage(discard_energy_count + mixer_potential + with_supporter_trashable)
+    # 最大打点（ベンチKO用: ボス必要→ゼイユ不可）
+    max_damage_bench = calc_damage(discard_energy_count + mixer_potential + no_supporter_trashable)
+
+    # リーサル判定（イワパレスはexで倒せないため除外）
+    is_lethal = False
+    lethal_needs_boss = False
+
+    # バトル場でリーサル（ボス不要）
+    for card in op_state.active:
+        if card is not None and card.id != Iwaparesu and card.hp <= max_damage_active:
+            if prize_count(card, True) >= my_remaining_prizes:
+                is_lethal = True
+                lethal_needs_boss = False
+
+    # ベンチでリーサル（ボス必要）
+    if not is_lethal and hand_has_boss:
+        for card in op_state.bench:
+            if card.id != Iwaparesu and card.hp <= max_damage_bench:
+                if prize_count(card, True) >= my_remaining_prizes:
+                    is_lethal = True
+                    lethal_needs_boss = True
+
+    # --- ボスの指令でワンパンできる相手アタッカー(exに限らない)がいるか ---
+    can_boss_ko_attacker = False
     for card in op_state.bench:
-        if card_table[card.id].ex and card.hp <= current_damage:
-            can_boss_ko_ex = True
+        if card.hp <= current_damage and len(card.energies) > 0:
+            can_boss_ko_attacker = True
+
+    # --- 今ターン攻撃可能か（手貼り・入れ替え込み） ---
+    active_can_attack = False
+    # バトル場のソウブレイズexが攻撃可能か
+    for card in my_state.active:
+        if card is not None and card.id == Ceruledge_ex:
+            if len(card.energies) >= 1:
+                active_can_attack = True
+            elif hand_fire_energy_count > 0 and not state.energyAttached:
+                active_can_attack = True  # 手札の炎エネを手貼りすれば攻撃可能
+    # ベンチにエネ付きソウブレイズexがいて入れ替え手段がある場合も攻撃可能
+    if not active_can_attack and bench_attacker:
+        has_switch_card = hand_counts.get(Switch, 0) > 0
+        can_retreat_active = False
+        for card in my_state.active:
+            if card is not None:
+                retreat_cost = {Budew: 0, Mogurew: 1, Fezandipiti_ex: 1, Ogerpon_Hearth: 1, Charcadet: 2, Ceruledge_ex: 2}.get(card.id, 2)
+                available = len(card.energies)
+                if not state.energyAttached and hand_energy_count > 0:
+                    available += 1
+                if available >= retreat_cost:
+                    can_retreat_active = True
+        if has_switch_card or can_retreat_active:
+            active_can_attack = True
 
     # --- 対イワパレス時のボスの指令ターゲット ---
+    # バトル場がイワパレスの時のみ使用。ワンパンできる非イワパレスを呼び出す
+    # アタッカーが攻撃可能（エネ付き or 手貼り可能）でなければボスを使わない
+    # ダメージはmax_damage_bench（ミキサー+ハイパーボール込み、ゼイユ不可）で判定
     boss_iwaparesu_target = False
-    if iwaparesu_mode:
+    if iwaparesu_mode and op_active_is_iwaparesu and active_can_attack:
         for card in op_state.bench:
-            if card.id in (Ishizumai_A, Ishizumai_B):
+            if card.id != Iwaparesu and card.hp <= max_damage_bench:
                 boss_iwaparesu_target = True
                 break
-        if not boss_iwaparesu_target:
-            for card in op_state.bench:
-                if card.id != Iwaparesu:
-                    boss_iwaparesu_target = True
-                    break
 
     # --- サポート選択ロジック ---
     playable_supporters = set()
@@ -430,13 +495,24 @@ def agent(obs_dict):
 
     use_support = 0
     if not state.supporterPlayed:
-        if iwaparesu_mode and boss_iwaparesu_target and op_active_is_iwaparesu and Boss_Orders in playable_supporters:
+        # リーサル最優先
+        if is_lethal and lethal_needs_boss and Boss_Orders in playable_supporters:
             use_support = Boss_Orders
-        elif can_boss_ko_ex and Boss_Orders in playable_supporters:
+        elif is_lethal and not lethal_needs_boss and hand_has_zeyu and Zeyu in playable_supporters and hand_trashable_energy > 0:
+            use_support = Zeyu  # バトル場リーサル: ゼイユでエネトラッシュして打点を上げる
+        # 対イワパレス
+        elif iwaparesu_mode and boss_iwaparesu_target and Boss_Orders in playable_supporters:
+            use_support = Boss_Orders
+        # 通常時: アタッカーをワンパン
+        elif not iwaparesu_mode and can_boss_ko_attacker and Boss_Orders in playable_supporters:
             use_support = Boss_Orders
         elif skip_draw_supporters:
-            # ドローサポートを使わない（ボスの指令は上で処理済み）
             use_support = 0
+        # 残りサイド6枚: 手札の半分以上が闘エネならゼイユ（打点寄与）、そうでなければリーリエ（8枚ドロー）
+        elif my_remaining_prizes >= 6 and hand_fighting_energy_count * 2 >= hand_size and Zeyu in playable_supporters:
+            use_support = Zeyu
+        elif my_remaining_prizes >= 6 and Lillie_Determination in playable_supporters:
+            use_support = Lillie_Determination
         elif zeyu_preferred and Zeyu in playable_supporters:
             use_support = Zeyu
         elif Lillie_Determination in playable_supporters:
@@ -444,12 +520,53 @@ def agent(obs_dict):
         elif Zeyu in playable_supporters:
             use_support = Zeyu
 
+    # --- オーガポンをバトル場に出すためのにげる判定 ---
+    # イワパレスがバトル場にいて、ボスで非イワパレスを呼べない時のみオーガポンで殴る
+    do_retreat_for_ogerpon = (iwaparesu_mode
+                              and op_active_is_iwaparesu
+                              and ogerpon_on_bench
+                              and ogerpon_ready
+                              and active_id != Ogerpon_Hearth
+                              and use_support != Boss_Orders)
+
+    # --- オーガポン温存: バトル場にいるが今ターン攻撃できない→逃がす ---
+    # 手貼り1枚で3エネ(炎2+何でも1)に届くか判定
+    can_ogerpon_reach_ready = (ogerpon_total_energy_count >= 2
+        and ((ogerpon_fire_energy_count >= 2 and hand_energy_count > 0)
+             or (ogerpon_fire_energy_count == 1 and hand_fire_energy_count > 0)))
+    do_retreat_ogerpon_preserve = (iwaparesu_mode
+                                    and active_id == Ogerpon_Hearth
+                                    and not ogerpon_ready
+                                    and not can_ogerpon_reach_ready
+                                    and use_support != Boss_Orders
+                                    and len(my_state.bench) > 0)
+
+    # アタッカー入れ替え: ベンチにエネ付きソウブレイズexがいて、バトル場が非アタッカー
+    # スボミーも対象（ソウブレイズが育ったらグッズロックより攻撃優先）
+    # イワパレスがバトル場にいる時はソウブレイズexを前に出しても無駄なので入れ替えない
+    do_retreat_for_attacker = (not do_retreat_for_budew
+                               and not do_retreat_for_ogerpon
+                               and not do_retreat_ogerpon_preserve
+                               and active_id != Ceruledge_ex
+                               and not (iwaparesu_mode and op_active_is_iwaparesu)
+                               and bench_attacker)
+
+    # キチキギスexがバトル場に出た場合のにげる判定
+    do_retreat_for_fezandipiti = (active_id == Fezandipiti_ex
+                                  and not do_retreat_for_budew
+                                  and not do_retreat_for_ogerpon
+                                  and not do_retreat_ogerpon_preserve
+                                  and not do_retreat_for_attacker
+                                  and len(my_state.bench) > 0)
+
     # --- にげる判定 ---
     if active_id == Budew:
         do_switch = False
     elif do_retreat_for_budew:
         do_switch = True
     elif do_retreat_for_ogerpon:
+        do_switch = True
+    elif do_retreat_ogerpon_preserve:
         do_switch = True
     elif do_retreat_for_attacker:
         do_switch = True
@@ -505,6 +622,18 @@ def agent(obs_dict):
                     if o.playerIndex == my_index:
                         if card.id == Ogerpon_Hearth and do_retreat_for_ogerpon:
                             score += 200000
+                        elif do_retreat_ogerpon_preserve:
+                            # オーガポン温存時の入れ替え先: 消耗品を壁に
+                            if card.id == Mogurew:
+                                score += 12000
+                            elif card.id == Charcadet:
+                                score += 10000
+                            elif card.id == Ceruledge_ex:
+                                score += 8000  # アタッカーを壁にするのは最終手段
+                            elif card.id == Fezandipiti_ex:
+                                score += 1000
+                            else:
+                                score += 5000
                         elif card.id == Ceruledge_ex:
                             score += 50000 + energy_count * 5000
                         elif card.id == Charcadet:
@@ -525,16 +654,30 @@ def agent(obs_dict):
                         score += energy_count * 1000 + hp
                     else:
                         if iwaparesu_mode:
-                            if card.id in (Ishizumai_A, Ishizumai_B):
-                                score += 150000
-                            elif card.id == Iwaparesu:
-                                score += 1000
+                            # リーサル > イシズマイ > サイド優先。いずれもワンパンできる時のみ
+                            if card.id == Iwaparesu:
+                                score += 1000  # イワパレスは最低優先（exで倒せない）
+                            elif card.hp <= max_damage_bench and prize_count(card, True) >= my_remaining_prizes:
+                                score += 300000 + pokemon_score(card, True)  # リーサル最優先
+                            elif card.hp <= max_damage_bench and card.id in (Ishizumai_A, Ishizumai_B):
+                                score += 200000 + pokemon_score(card, True)  # イシズマイ優先
+                            elif card.hp <= max_damage_bench:
+                                score += 100000 + prize_count(card, True) * 10000 + pokemon_score(card, True)
                             else:
-                                score += 100000
+                                score += 2000  # ワンパンできない→呼ばない
                         else:
+                            # ターゲット優先度: リーサル > アタッカー > 進化前 > システムポケモン
                             score += pokemon_score(card, True)
-                            if hp <= current_damage:
-                                score += 50000
+                            if hp <= max_damage_bench and card.id != Iwaparesu:
+                                prizes_from_ko = prize_count(card, True)
+                                if prizes_from_ko >= my_remaining_prizes:
+                                    score += 200000  # リーサル最優先
+                                elif len(card.energies) > 0:
+                                    score += 80000  # アタッカー（エネ付き）
+                                elif card.id in PRE_EVOLUTIONS:
+                                    score += 60000  # 進化前を潰す
+                                else:
+                                    score += 50000  # その他
 
                 elif context == SelectContext.SETUP_BENCH_POKEMON:
                     # バトル開始前はモグリュー・オーガポンを出さない
@@ -858,12 +1001,23 @@ def agent(obs_dict):
 
             # --- サポート ---
             elif card.id == Zeyu:
-                score = draw_support_score if card.id == use_support else -1
+                if card.id == use_support:
+                    if is_lethal and not lethal_needs_boss:
+                        score = 93000  # リーサル用エネトラッシュ
+                    else:
+                        score = draw_support_score
+                else:
+                    score = -1
             elif card.id == Lillie_Determination:
                 score = draw_support_score if card.id == use_support else -1
             elif card.id == Boss_Orders:
                 if card.id == use_support:
-                    score = 93000 if iwaparesu_mode else 35000
+                    if is_lethal and lethal_needs_boss:
+                        score = 93000  # リーサル最優先
+                    elif iwaparesu_mode:
+                        score = 93000
+                    else:
+                        score = 35000
                 else:
                     score = -1
 
@@ -879,18 +1033,25 @@ def agent(obs_dict):
             # オーガポンをバトル場に出すためのにげるコスト用手貼り
             elif do_retreat_for_ogerpon and is_active and p_energy_count == 0:
                 score = 92000
-            # アタッカー入れ替え用の手貼り
-            elif do_retreat_for_attacker and is_active and p_energy_count == 0:
+            # オーガポン温存: にげるコスト用手貼り
+            elif do_retreat_ogerpon_preserve and is_active and p_energy_count == 0:
+                score = 92000
+            # アタッカー入れ替え用の手貼り（スボミーは逃げるコスト0なので不要）
+            elif do_retreat_for_attacker and is_active and p_energy_count == 0 and active_id != Budew:
                 score = 92000
             # キチキギスex退避用の手貼り
             elif do_retreat_for_fezandipiti and is_active and p_energy_count == 0:
                 score = 92000
-            # 対イワパレス時: オーガポンにエネルギーを付ける（3枚まで）
-            elif iwaparesu_mode and op_active_is_iwaparesu and pokemon.id == Ogerpon_Hearth and card.id == Basic_Fire_Energy and p_energy_count < 3:
-                score = 86000
-            # オーガポンはエネルギー3枚まで付けられる
-            elif pokemon.id == Ogerpon_Hearth and card.id == Basic_Fire_Energy and p_energy_count < 3 and iwaparesu_mode:
-                score = 86000
+            # 対イワパレス時: オーガポンにエネルギーを付ける（炎2+何でも1=計3枚まで）
+            # 相手バトル場がイワパレスかつボスでワンパンできない時のみオーガポン優先
+            elif (iwaparesu_mode and pokemon.id == Ogerpon_Hearth and p_energy_count < 3
+                  and op_active_is_iwaparesu and not boss_iwaparesu_target):
+                if card.id == Basic_Fire_Energy and ogerpon_fire_energy_count < 2:
+                    score = 86000  # 炎エネ2枚まで優先
+                elif ogerpon_fire_energy_count >= 2:
+                    score = 86000  # 炎2枚付いたら何でもOK（闘エネも可）
+                else:
+                    score = -1  # 炎2枚未満で非炎エネは付けない
             # エネルギーが1枚以上付いているポケモンには付けない
             elif p_energy_count >= 1:
                 score = -1
@@ -900,13 +1061,16 @@ def agent(obs_dict):
                 score = 60000 + (1000 if is_active else 0)
             elif card.id == Basic_Fire_Energy:
                 if pokemon.id == Ceruledge_ex:
-                    if iwaparesu_mode and op_active_is_iwaparesu:
-                        score = -1  # イワパレスがバトル場にいるときはソウブレイズexに付けない
+                    # 相手バトル場がイワパレスかつボスでワンパンできない時のみソウブレイズの優先度を下げる
+                    if (iwaparesu_mode and not ogerpon_ready and field_counts[Ogerpon_Hearth] > 0
+                            and op_active_is_iwaparesu and not boss_iwaparesu_target):
+                        score = 80000 if is_active else 78000  # オーガポン(86000)より低い
                     else:
                         score = 90000 if is_active else 86000
                 elif pokemon.id == Charcadet:
-                    if iwaparesu_mode and op_active_is_iwaparesu:
-                        score = -1
+                    if (iwaparesu_mode and not ogerpon_ready and field_counts[Ogerpon_Hearth] > 0
+                            and op_active_is_iwaparesu and not boss_iwaparesu_target):
+                        score = 78000 if is_active else 76000
                     else:
                         score = 88000 if is_active else 84000
                 else:
@@ -933,6 +1097,8 @@ def agent(obs_dict):
             if do_retreat_for_budew:
                 score = 82000
             elif do_retreat_for_ogerpon:
+                score = 91000
+            elif do_retreat_ogerpon_preserve:
                 score = 91000
             elif do_retreat_for_attacker:
                 score = 91000

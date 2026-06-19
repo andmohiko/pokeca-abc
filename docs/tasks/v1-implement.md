@@ -43,7 +43,7 @@ agent(obs_dict)
 | 46,000 | ポケパッド | カルボウ・モグリューサーチ |
 | 45,000 | ハイパーボール | コストでエネをトラッシュ。ソウブレイズex/キチキギスexサーチ |
 | 44,000 | 夜のタンカ | 状況により回収対象が変わる（後述） |
-| 35,000 | ボスの指令 | 相手exをワンパンできる場合。対イワパレス時はイシズマイ呼び出し |
+| 35,000 | ボスの指令 | リーサル or 相手アタッカー(exに限らない)をワンパンできる場合。対イワパレス時はバトル場がイワパレスの時のみ非イワパレスを呼び出し |
 | 14,000 | ドロー系サポート（行動可能なカードがある時） | 手札を使い切ってから |
 | 10,000 | にげる（通常） | 必要な場合のみ |
 | attackId | 攻撃（しんえんほむら等） | ターン最後の行動 |
@@ -81,6 +81,7 @@ ACE SPEC。山札から好きなカードを5枚までトラッシュ。**山札
 
 バトル場のポケモンがソウブレイズex以外で、ベンチにエネルギー付きソウブレイズexがいる場合：
 バトル場のポケモンにエネルギーを手貼り（スコア92,000）→ にげる（スコア91,000）→ ソウブレイズexを前に出す。
+**スボミーは逃げるコスト0なので手貼り不要。** 手貼りをスキップして直接にげる。
 
 **パーフェクトミキサー・炎エネ手貼りに次ぐ高優先度で行う。**
 
@@ -103,6 +104,30 @@ do_retreat_for_fezandipiti = (active_id == Fezandipiti_ex
 | にげる（RETREAT） | 91,000 | 手貼り後に逃げる |
 
 **入れ替え先:** SWITCH/TO_ACTIVEコンテキストで、アタッカー不在時はモグリューを優先（12,000）。カルボウ（10,000）は進化元として温存する。
+
+### オーガポン温存
+
+オーガポンがバトル場にいるが今ターン攻撃できない場合、温存のために逃がす。
+
+```python
+can_ogerpon_reach_ready = (ogerpon_total_energy_count >= 2
+    and ((ogerpon_fire_energy_count >= 2 and hand_energy_count > 0)
+         or (ogerpon_fire_energy_count == 1 and hand_fire_energy_count > 0)))
+do_retreat_ogerpon_preserve = (iwaparesu_mode
+    and active_id == Ogerpon_Hearth
+    and not ogerpon_ready
+    and not can_ogerpon_reach_ready
+    and use_support != Boss_Orders
+    and len(my_state.bench) > 0)
+```
+
+| 行動 | スコア |
+|---|---|
+| エネルギー手貼り（にげるコスト用） | 92,000 |
+| にげる | 91,000 |
+| ポケモンいれかえ | 38,000（do_switch経由） |
+
+**入れ替え先:** モグリュー（12,000）→ カルボウ（10,000）→ ソウブレイズex（8,000）。消耗品を壁にしてオーガポンを温存する。
 
 ### ドローソースのスコア制御
 
@@ -189,16 +214,77 @@ ACE SPEC     → スコア-200,000（捨てない）
 #### 例外2: アタッカー入れ替え
 ベンチにエネ付きソウブレイズexがいてバトル場が非アタッカーの場合、バトル場のポケモンに手貼り（スコア92,000）→ にげる（スコア91,000）でソウブレイズexを前に出す。
 
+### リーサル判定
+
+`agent()`は行動ごとに呼ばれるため、リーサル判定も毎回最新の盤面（トラッシュ・手札）で再評価される。`playable_supporters`（MAINコンテキスト依存）ではなく`hand_counts`（コンテキスト非依存）でサポートの有無を判定する。
+
+```python
+# 手札ベースでサポート/グッズの有無を判定（コンテキスト非依存）
+hand_has_boss = hand_counts.get(Boss_Orders, 0) > 0 and not state.supporterPlayed
+hand_has_zeyu = hand_counts.get(Zeyu, 0) > 0 and not state.supporterPlayed
+hand_has_hyper_ball = hand_counts.get(Ultra_Ball, 0) > 0
+
+# 手札からトラッシュ可能なエネルギー枚数
+hand_trashable_energy = hand_fighting_energy_count
+if has_fire_energy_on_field:
+    hand_trashable_energy += hand_fire_energy_count
+elif hand_fire_energy_count >= 2:
+    hand_trashable_energy += hand_fire_energy_count - 1  # 1枚は手貼り用
+
+# パーフェクトミキサーの追加トラッシュ
+mixer_potential = min(5, deck_counts[Basic_Fighting_Energy]) if hand_counts.get(Perfect_Mixer, 0) > 0 else 0
+
+# サポートなしでトラッシュ可能（ハイパーボール: 最大2枚）
+no_supporter_trashable = min(hand_trashable_energy, 2) if hand_has_hyper_ball else 0
+
+# サポート(ゼイユ)ありでトラッシュ可能
+with_supporter_trashable = hand_trashable_energy if (hand_has_zeyu or hand_has_hyper_ball) else 0
+
+# 最大打点（バトル場KO用: ゼイユ使用可）
+max_damage_active = calc_damage(discard_energy_count + mixer_potential + with_supporter_trashable)
+# 最大打点（ベンチKO用: ボス必要→ゼイユ不可）
+max_damage_bench = calc_damage(discard_energy_count + mixer_potential + no_supporter_trashable)
+
+# リーサル判定（イワパレスはexで倒せないため除外）
+is_lethal = False
+lethal_needs_boss = False
+
+for card in op_state.active:
+    if card is not None and card.id != Iwaparesu and card.hp <= max_damage_active:
+        if prize_count(card, True) >= my_remaining_prizes:
+            is_lethal = True
+            lethal_needs_boss = False
+
+if not is_lethal and hand_has_boss:
+    for card in op_state.bench:
+        if card.id != Iwaparesu and card.hp <= max_damage_bench:
+            if prize_count(card, True) >= my_remaining_prizes:
+                is_lethal = True
+                lethal_needs_boss = True
+```
+
+#### リーサル時の行動変更
+
+| 変更点 | 通常 | リーサル時 |
+|---|---|---|
+| use_support | 通常ロジック | `lethal_needs_boss`ならBoss、そうでなければゼイユ（エネトラッシュ必要時） |
+| ドロー抑制 | 理想盤面/LO時 | ドロー不要（リーサルに不要な行動をスキップ） |
+| do_switch | 通常ロジック | リーサル時はアタッカーを前に出す以外の入れ替え不要 |
+
 ### サポート選択
 
 1ターンに1枚のみ使えるため、ターン開始時に最適なサポートを事前決定する：
 
 | 優先度 | サポート | 条件 |
 |---|---|---|
-| 1 | ボスの指令 | 相手ベンチにワンパンできるexがいる、または対イワパレス時にイシズマイ/他ポケモンを呼び出す |
-| 2 | ゼイユ | 捨てられるカード > 捨てたくないカード |
-| 3 | リーリエの決心 | 通常時のドローソース |
-| 4 | ゼイユ | 最終フォールバック。条件が悪くても使わないよりマシ |
+| 0 | ボスの指令 | リーサル（ベンチのポケモンを倒して残りサイドを取りきれる） |
+| 1 | ボスの指令 | 対イワパレス時: 相手バトル場がイワパレス AND ベンチにワンパンできる非イワパレスがいる |
+| 1 | ボスの指令 | 相手のアタッカーを倒せる（exに限らない） |
+| 2 | ゼイユ | 残りサイド6枚 AND 手札の半分以上が闘エネ（打点寄与優先） |
+| 3 | リーリエの決心 | 残りサイド6枚（8枚ドローで序盤展開加速） |
+| 4 | ゼイユ | 捨てられるカード > 捨てたくないカード |
+| 5 | リーリエの決心 | 通常時のドローソース |
+| 6 | ゼイユ | 最終フォールバック。条件が悪くても使わないよりマシ |
 
 #### ゼイユの使用条件（リーリエより優先される条件）
 
@@ -356,7 +442,7 @@ ideal_board = ceruledge_with_energy >= 2
 | 条件 | 制限 | 実装 |
 |---|---|---|
 | `ideal_board == True` | ドローサポートを使わない | `draw_support_score = -1` |
-| `my_state.deckCount <= 8` | ゼイユ・リーリエを使わない | サポート選択でゼイユ・リーリエを除外 |
+| `my_state.deckCount <= 12` | ゼイユ・リーリエを使わない | サポート選択でゼイユ・リーリエを除外 |
 
 **ボスの指令は山札を引かないため制限対象外。**
 
@@ -421,20 +507,59 @@ iwaparesu_mode = _iwaparesu_mode
 #### 対イワパレスモードでの変更点
 
 **ボスの指令の条件変更:**
-- 通常: 相手exをワンパンできる場合のみ
-- 対イワパレス: イシズマイがベンチにいれば呼び出す。いなければ他のポケモンを呼び出す（スコア93,000、パーフェクトミキサーの次に最優先）
+- 通常: リーサル or 相手アタッカーをワンパンできる場合
+- 対イワパレス: **相手バトル場がイワパレス AND ベンチにワンパンできる非イワパレスがいる AND バトル場のアタッカーが攻撃可能（エネ付き or 手貼り可能）の時のみ使用。** ワンパンできないのに呼び出して殴るのは無駄。**サイドを多く取れるターゲットを優先する**
+- ワンパン判定は`max_damage_bench`（ミキサー+ハイパーボール込み、ゼイユ不可）で判定する
+
+```python
+# 今ターン攻撃可能か（手貼り・入れ替え込み）
+active_can_attack = False
+# バトル場のソウブレイズexが攻撃可能か
+for card in my_state.active:
+    if card is not None and card.id == Ceruledge_ex:
+        if len(card.energies) >= 1:
+            active_can_attack = True
+        elif hand_fire_energy_count > 0 and not state.energyAttached:
+            active_can_attack = True
+# ベンチにエネ付きソウブレイズexがいて入れ替え手段がある場合も攻撃可能
+if not active_can_attack and bench_attacker:
+    has_switch_card = hand_counts.get(Switch, 0) > 0
+    can_retreat_active = False
+    for card in my_state.active:
+        if card is not None:
+            retreat_cost = {Budew: 0, Mogurew: 1, ...}.get(card.id, 2)
+            available = len(card.energies)
+            if not state.energyAttached and hand_energy_count > 0:
+                available += 1
+            if available >= retreat_cost:
+                can_retreat_active = True
+    if has_switch_card or can_retreat_active:
+        active_can_attack = True
+
+boss_iwaparesu_target = False
+if iwaparesu_mode and op_active_is_iwaparesu and active_can_attack:
+    for card in op_state.bench:
+        if card.id != Iwaparesu and card.hp <= max_damage_bench:
+            boss_iwaparesu_target = True
+            break
+```
 
 **手貼り先の変更:**
-- 相手バトル場がイワパレス → オーガポンに手貼り（エネ3枚まで）
-- 相手バトル場がイワパレス以外 → ソウブレイズexに手貼り（通常通り）
+- **相手バトル場がイワパレス以外 → ソウブレイズexに通常通り手貼り。** ダメージが通るのでオーガポンより優先
+- **相手バトル場がイワパレス AND ボスでワンパンできる相手がいる → ソウブレイズexに手貼り。** ボスで呼んで倒すため
+- **相手バトル場がイワパレス AND ワンパンできない → オーガポンに手貼り。** オーガポンでイワパレスを倒す準備
+- オーガポンのエネルギー要件: 炎2枚 + 何でも1枚（闘エネでもOK）
+- オーガポンに炎2枚付いたら闘エネも手貼り可能
+- オーガポンにエネ3枚以上付いたらソウブレイズexに手貼り
 
 | 対象 | 条件 | スコア |
 |---|---|---|
-| ベンチのオーガポン（エネ3枚未満） | 相手バトル場がイワパレス | 86,000 |
-| バトル場のソウブレイズex | 相手バトル場がイワパレス以外 | 90,000（通常通り） |
+| ベンチのオーガポン（炎エネ2枚未満） | イワパレスモード AND 相手バトル場がイワパレス AND ボスでワンパンできない | 86,000（炎エネ手貼り） |
+| ベンチのオーガポン（炎エネ2枚以上、総エネ3枚未満） | 同上 | 86,000（闘エネでもOK） |
+| バトル場/ベンチのソウブレイズex | 相手バトル場がイワパレス以外 or ボスでワンパンできる | 90,000/86,000（通常通り） |
 
 **オーガポンのバトル場投入:**
-- オーガポンに炎エネ3枚 AND 相手バトル場がイワパレス → にげるでオーガポンをバトル場に出す（スコア91,000）
+- オーガポンにエネ3枚（炎2+何でも1） AND 相手バトル場がイワパレス AND ボスなし（`use_support != Boss_Orders`） → にげるでオーガポンをバトル場に出す（スコア91,000）
 - それ以外 → オーガポンはベンチで待機
 
 **夜のタンカの制限:**
